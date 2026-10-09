@@ -1,8 +1,8 @@
 import os
 import time
+import threading
 import uuid
-import urllib.request
-from fastapi import FastAPI, File, Form, UploadFile, Request
+from fastapi import FastAPI, File, Form, UploadFile, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response, HTMLResponse
 import cv2  # OpenCV
@@ -19,6 +19,99 @@ app = FastAPI()
 
 # Размер группы для группового формата (число гимнасток)
 GROUP_SIZE = 5
+
+# --- Авторизация и rate limiting на /upload (пункт 6 ревью) ---
+# Список валидных API-ключей задается переменной окружения API_KEYS (ключи через запятую).
+# Если переменная не задана или пуста — открытый доступ (режим разработки/MVP).
+# Для продакшена: задайте API_KEYS в окружении, клиенты передают ключ в заголовке X-API-Key.
+API_KEYS = [
+    k.strip() for k in os.environ.get("API_KEYS", "").split(",") if k.strip()
+]
+API_KEY_HEADER = "X-API-Key"
+
+# Rate limit на /upload: сколько загрузок в минуту разрешено на один ключ/IP.
+# Счетчики хранятся в памяти процесса (сбрасываются при рестарте) — для MVP достаточно.
+UPLOAD_RATE_LIMIT_PER_MINUTE = int(os.environ.get("UPLOAD_RATE_LIMIT_PER_MINUTE", "5"))
+
+_rate_limit_lock = threading.Lock()
+_rate_limit_buckets: dict = {}  # client_id -> list[timestamp] последних запросов
+
+
+def _client_id(request: Request, api_key: str) -> str:
+    """Идентификатор клиента для rate limit: API-ключ или IP-адрес."""
+    return api_key or (request.client.host if request.client else "unknown")
+
+
+def _check_rate_limit(client_id: str) -> bool:
+    """
+    Скользящее окно 60 секунд: возвращает True, если запрос разрешен
+    (не превышен UPLOAD_RATE_LIMIT_PER_MINUTE).
+    """
+    now = time.monotonic()
+    with _rate_limit_lock:
+        bucket = _rate_limit_buckets.setdefault(client_id, [])
+        # Убираем записи старше 60 секунд
+        bucket[:] = [ts for ts in bucket if now - ts < 60.0]
+        if len(bucket) >= UPLOAD_RATE_LIMIT_PER_MINUTE:
+            return False
+        bucket.append(now)
+        return True
+
+
+def _require_api_key(request: Request) -> str:
+    """
+    Проверяет API-ключ (если авторизация настроена через API_KEYS).
+    Возвращает ключ клиента (или ""), если авторизация выключена.
+    Бросает HTTPException 401/429 при ошибке.
+    """
+    api_key = request.headers.get(API_KEY_HEADER, "")
+    if API_KEYS:
+        if api_key not in API_KEYS:
+            raise HTTPException(
+                status_code=401,
+                detail="Недействительный API-ключ. Передайте ключ в заголовке X-API-Key.",
+            )
+    if not _check_rate_limit(_client_id(request, api_key)):
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Превышен лимит загрузок: {UPLOAD_RATE_LIMIT_PER_MINUTE} в минуту. "
+                "Повторите попытку позже."
+            ),
+        )
+    return api_key
+
+
+# --- Ленивый singleton PoseLandmarker (пункт 5 ревью) ---
+# Инстанс MediaPipe дорогой: создается один раз и переиспользуется между запросами.
+# threading.Lock защищает от гонки при одновременных первых запросах (threadpool).
+_pose_lock = threading.Lock()
+_pose_landmarker = None
+
+# Каждое новое видео анализируется со своим базовым таймстампом:
+# detect_for_video требует монотонно растущие таймстампы между вызовами
+# одного инстанса, поэтому к таймстампам кадра добавляем смещение per-video.
+_VIDEO_TS_OFFSET_MS = 100_000  # запас > максимальной длительности одного видео
+_pose_ts_offset = [0]  # общий счетчик смещений (под защищенным доступом via _pose_lock)
+
+
+def get_pose_landmarker():
+    """Возвращает переиспользуемый инстанс PoseLandmarker (создается лениво)."""
+    global _pose_landmarker
+    if _pose_landmarker is None:
+        with _pose_lock:
+            if _pose_landmarker is None:  # double-checked locking
+                base_options = mp_python.BaseOptions(model_asset_path=MODEL_PATH)
+                options = mp_vision.PoseLandmarkerOptions(
+                    base_options=base_options,
+                    running_mode=mp_vision.RunningMode.VIDEO,
+                    min_pose_detection_confidence=0.5,
+                    min_pose_presence_confidence=0.5,
+                    min_tracking_confidence=0.5,
+                )
+                _pose_landmarker = mp_vision.PoseLandmarker.create_from_options(options)
+    return _pose_landmarker
+
 
 # CORS: разрешаем обращения с фронтенда (SourceCraft Sites), локальной разработки
 # и туннелей Google Colab (Cloudflare/ngrok)
@@ -45,12 +138,58 @@ MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # --- MediaPipe Tasks API (новый API, совместим с Python 3.13) ---
-# Модель PoseLandmarker скачивается автоматически при первом запуске
-MODEL_URL = (
-    "https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
-    "pose_landmarker_lite/float16/1/pose_landmarker_lite.task"
-)
+# Модель pose_landmarker_lite.task должна лежать в корне проекта.
+# Скачивание при импорте убрано (side effect на import + race condition воркеров):
+# модель ставится скриптом scripts/download_pose_model.py, который записывает
+# pin-файл pose_landmarker_lite.sha256; при старте приложения целостность
+# файла проверяется по этому pin-хешу.
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "pose_landmarker_lite.task")
+MODEL_SHA256_PATH = MODEL_PATH + ".sha256"
+
+
+def _file_sha256(path: str) -> str:
+    """Вычисляет SHA-256 файла (потоково, для больших файлов)."""
+    import hashlib
+
+    sha256 = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            sha256.update(chunk)
+    return sha256.hexdigest()
+
+
+def verify_pose_model() -> bool:
+    """
+    Проверяет наличие модели и её целостность по pin-хешу (если pin-файл есть).
+
+    Возвращает True, только если модель существует И (pin-файл отсутствует —
+    тогда в /health будет degraded до первой проверки скриптом; или хеш совпал).
+    """
+    if not os.path.exists(MODEL_PATH):
+        print(
+            "Модель PoseLandmarker не найдена. Запустите: "
+            "python scripts/download_pose_model.py"
+        )
+        return False
+    if not os.path.exists(MODEL_SHA256_PATH):
+        print(
+            "ПРЕДУПРЕЖДЕНИЕ: pin-файл SHA-256 модели отсутствует "
+            f"({MODEL_SHA256_PATH}). Запустите python scripts/download_pose_model.py, "
+            "чтобы зафиксировать доверенный хеш."
+        )
+        return False
+    with open(MODEL_SHA256_PATH, "r", encoding="utf-8") as f:
+        pinned = f.read().strip()
+    if _file_sha256(MODEL_PATH) != pinned:
+        print(
+            "ПРЕДУПРЕЖДЕНИЕ: SHA-256 модели PoseLandmarker не совпадает с pin-хешем. "
+            "Запустите python scripts/download_pose_model.py, чтобы скачать доверенную версию."
+        )
+        return False
+    return True
+
+
+POSE_MODEL_OK = verify_pose_model()
 
 # Кастомная ONNX-модель детекции булав (обучается через train_club_detector.py).
 # Если файл отсутствует — используется HSV-сегментация (club_tracker.py).
@@ -69,17 +208,6 @@ LANDMARK_LEFT_KNEE = 25
 LANDMARK_RIGHT_KNEE = 26
 LANDMARK_LEFT_ANKLE = 27
 LANDMARK_RIGHT_ANKLE = 28
-
-
-def ensure_pose_model() -> None:
-    """Скачивает модель PoseLandmarker, если она ещё не загружена."""
-    if not os.path.exists(MODEL_PATH):
-        print("Загрузка модели PoseLandmarker...")
-        urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
-        print("Модель загружена.")
-
-
-ensure_pose_model()
 
 
 def validate_video_file(filename: str, content_length: int) -> None:
@@ -1556,6 +1684,33 @@ def _latency_stats(frame_latencies_ms: list) -> dict:
     }
 
 
+def _open_video_with_rotation(video_path: str):
+    """
+    Открывает VideoCapture и учитывает rotation metadata вертикальных видео
+    (смартфонная съемка). OpenCV игнорирует метаданные поворота: кадр приходит
+    «лежащим» на 90/270° и детекция позы ломается. Возвращает (cap, rotate_code),
+    где rotate_code — cv2.ROTATE_90_CLOCKWISE / ROTATE_180 / ROTATE_90_COUNTERCLOCKWISE
+    или None, если поворот не нужен.
+    """
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return None, None
+
+    try:
+        orientation = int(cap.get(cv2.CAP_PROP_ORIENTATION_META))
+    except (cv2.error, TypeError, ValueError):
+        orientation = 0
+
+    rotate_code = None
+    if orientation in (90, -90):
+        # -90 и 90 в OpenCV трактуются одинаково как 90° по часовой;
+        # -180/180 не встречаются в CAP_PROP_ORIENTATION_META (только 0/90/180/270)
+        rotate_code = cv2.ROTATE_90_CLOCKWISE if orientation == 90 else cv2.ROTATE_90_COUNTERCLOCKWISE
+    elif orientation == 180:
+        rotate_code = cv2.ROTATE_180
+    return cap, rotate_code
+
+
 def analyze_video(video_path: str, exercise: str = "unknown", format_type: str = "individual") -> dict:
     """
     Анализирует видео с помощью MediaPipe PoseLandmarker (Tasks API):
@@ -1566,8 +1721,8 @@ def analyze_video(video_path: str, exercise: str = "unknown", format_type: str =
     format_type: "individual" — одна гимнастка (самая крупная в кадре),
                  "group" — группа из GROUP_SIZE гимнасток.
     """
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
+    cap, rotate_code = _open_video_with_rotation(video_path)
+    if cap is None:
         return {"error": "Не удалось открыть видеофайл"}
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -1587,44 +1742,47 @@ def analyze_video(video_path: str, exercise: str = "unknown", format_type: str =
     # Трекер булав: использует кастомную ONNX-модель, если она есть, иначе HSV
     club_tracker = ClubTracker(model_path=CLUB_MODEL_PATH)
 
-    base_options = mp_python.BaseOptions(model_asset_path=MODEL_PATH)
-    options = mp_vision.PoseLandmarkerOptions(
-        base_options=base_options,
-        running_mode=mp_vision.RunningMode.VIDEO,
-        min_pose_detection_confidence=0.5,
-        min_pose_presence_confidence=0.5,
-        min_tracking_confidence=0.5,
-    )
+    landmarker = get_pose_landmarker()
+    # Смещение таймстампов: инстанс PoseLandmarker singleton, и detect_for_video
+    # требует монотонно растущие таймстампы между видео; каждому видео — свой диапазон
+    with _pose_lock:
+        ts_offset = _pose_ts_offset[0]
+        _pose_ts_offset[0] += _VIDEO_TS_OFFSET_MS
 
-    with mp_vision.PoseLandmarker.create_from_options(options) as landmarker:
-        frame_idx = 0
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
+    frame_idx_holder = [0]  # мутируемый счетчик кадров (int в замыкании не мутируется)
 
-            if frame_idx % frame_interval == 0:
-                frame_start = time.perf_counter()
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-                timestamp_ms = int(frame_idx * 1000 / fps) if fps else 0
-                results = landmarker.detect_for_video(mp_image, timestamp_ms)
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
 
-                # Сохраняем кадр для трекинга булав (если выбрано упражнение с булавами)
-                if exercise == "risk-buhavy":
-                    frames_for_clubs.append(frame)
+        if frame_idx_holder[0] % frame_interval == 0:
+            frame_start = time.perf_counter()
+            if rotate_code is not None:
+                frame = cv2.rotate(frame, rotate_code)
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+            frame_idx = frame_idx_holder[0]
+            timestamp_ms = (
+                ts_offset + int(frame_idx * 1000 / fps) if fps else ts_offset
+            )
+            results = landmarker.detect_for_video(mp_image, timestamp_ms)
 
-                pose_list = list(results.pose_landmarks) if results.pose_landmarks else []
-                world_list = list(results.world_landmarks) if results.world_landmarks else []
-                if pose_list:
-                    pose_detections += 1
-                    frames_with_poses.append((frame, pose_list, world_list))
+            # Сохраняем кадр для трекинга булав (если выбрано упражнение с булавами)
+            if exercise == "risk-buhavy":
+                frames_for_clubs.append(frame)
 
-                # Латентность обработки кадра (детекция позы + булавы), мс
-                frame_latencies_ms.append((time.perf_counter() - frame_start) * 1000.0)
-                frames_analyzed += 1
+            pose_list = list(results.pose_landmarks) if results.pose_landmarks else []
+            world_list = list(results.world_landmarks) if results.world_landmarks else []
+            if pose_list:
+                pose_detections += 1
+                frames_with_poses.append((frame, pose_list, world_list))
 
-            frame_idx += 1
+            # Латентность обработки кадра (детекция позы + булавы), мс
+            frame_latencies_ms.append((time.perf_counter() - frame_start) * 1000.0)
+            frames_analyzed += 1
+
+        frame_idx_holder[0] += 1
 
     cap.release()
 
@@ -1753,7 +1911,7 @@ def analyze_video(video_path: str, exercise: str = "unknown", format_type: str =
     }
 
 
-async def create_report(
+def create_report(
     analysis: dict,
     video_path: str,
     frames_with_poses: list,
@@ -1763,6 +1921,9 @@ async def create_report(
     """
     Сохраняет отчёт о тренировке: видео, метаданные, кадры ошибок
     и тепловую карту (для группового формата). Возвращает документ отчёта.
+
+    Синхронная функция: выполняется в threadpool FastAPI вместе с analyze_video,
+    чтобы не блокировать event loop (см. upload_video).
     """
     report_id = storage.create_report_id()
     report_dir = storage.get_report_dir(report_id, reports_dir)
@@ -1803,28 +1964,53 @@ async def create_report(
 
 
 @app.post("/upload")
-async def upload_video(
+def upload_video(
     request: Request,
     video_file: UploadFile = File(...),
     exercise: str = Form("unknown"),
     format_type: str = Form("individual"),
 ):
+    """
+    Загрузка видео и синхронный анализ.
+
+    Обычный def (не async): FastAPI выполняет эндпоинт в threadpool, поэтому
+    CPU-интенсивный analyze_video не блокирует event loop и конкурентные запросы.
+    """
+    # 0. Авторизация и rate limiting (если настроены API_KEYS)
+    _require_api_key(request)
+
     filename = video_file.filename or "video.mp4"
 
-    # 1. Валидация файла
+    # 1. Валидация файла (fast-path по Content-Length). Ошибка клиента ->
+    # корректный HTTP-статус вместо 200 с {"error": ...} в теле.
     try:
         validate_video_file(filename, video_file.size or 0)
     except ValueError as e:
-        return {"error": str(e)}
+        raise HTTPException(status_code=400, detail=str(e))
 
-    # 2. Сохранение файла во временную директорию
+    # 2. Сохранение файла во временную директорию (с жестким лимитом размера:
+    #    video_file.size может быть неизвестен при стриминговой загрузке)
     unique_name = f"{uuid.uuid4().hex}_{os.path.basename(filename)}"
     save_path = os.path.join(UPLOAD_DIR, unique_name)
 
     try:
+        written = 0
         with open(save_path, "wb") as buffer:
-            while chunk := await video_file.read(1024 * 1024):
+            while chunk := video_file.file.read(1024 * 1024):
+                written += len(chunk)
+                if written > MAX_FILE_SIZE_BYTES:
+                    break
                 buffer.write(chunk)
+
+        if written > MAX_FILE_SIZE_BYTES:
+            os.remove(save_path)
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"Файл слишком большой. Максимальный размер — "
+                    f"{MAX_FILE_SIZE_MB} МБ."
+                ),
+            )
 
         # 3. Анализ видео
         analysis = analyze_video(save_path, exercise, format_type)
@@ -1845,7 +2031,7 @@ async def upload_video(
             # Кадры ошибок снимаются с тех же кадров, что использовались в анализе
             frames_with_poses = analysis.pop("_frames_with_poses", [])
             fps = analysis.get("fps") or 30.0
-            doc = await create_report(analysis, save_path, frames_with_poses, fps)
+            doc = create_report(analysis, save_path, frames_with_poses, fps)
             report_id = doc.get("report_id")
             analysis = doc["analysis"]
             # Абсолютная ссылка на плеер — используется в PDF для таймкодов
@@ -1899,7 +2085,7 @@ async def get_report_pdf(report_id: str):
     """Возвращает PDF-карточку тренировки («Сохранить отчёт»)."""
     doc = _get_report_or_none(report_id)
     if doc is None:
-        return {"error": "Отчёт не найден"}
+        raise HTTPException(status_code=404, detail="Отчёт не найден")
 
     analysis = doc.get("analysis") or {}
     report_dir = storage.get_report_dir(report_id)
@@ -1969,10 +2155,10 @@ async def get_report_video(report_id: str, request: Request, t: float = None):
     """
     doc = _get_report_or_none(report_id)
     if doc is None:
-        return {"error": "Отчёт не найден"}
+        raise HTTPException(status_code=404, detail="Отчёт не найден")
     video_path = os.path.join(storage.get_report_dir(report_id), doc.get("video_file") or "")
     if not os.path.exists(video_path):
-        return {"error": "Видео отчёта не найдено"}
+        raise HTTPException(status_code=404, detail="Видео отчёта не найдено")
     return FileResponse(
         video_path,
         media_type="video/mp4",
@@ -2017,3 +2203,15 @@ async def video_player(report_id: str, t: float = 0.0):
   </body>
 </html>"""
     return HTMLResponse(html)
+
+
+@app.get("/health")
+async def health():
+    """
+    Health-check для деплой-проверок и мониторинга: статус сервиса
+    и готовность модели PoseLandmarker (наличие + совпадение pin-хеша).
+    """
+    return {
+        "status": "ok" if POSE_MODEL_OK else "degraded",
+        "pose_model_ok": POSE_MODEL_OK,
+    }
