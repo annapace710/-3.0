@@ -15,7 +15,13 @@
 - `requirements.txt` — зависимости Python
 - `requirements-train.txt` — зависимости для обучения модели
 - `uploads/temp/` — временная директория для загруженных видео
-- `uploads/reports/<id>/` — отчёты: `meta.json`, видео, `frames/` (скриншоты ошибок, тепловая карта)
+- `uploads/reports/<id>/` — отчёты: `meta.json`, видео, `frames/` (скриншоты ошибок, тепловая карта).
+  Директория создаётся автоматически при сохранении первого отчёта (в репозитории её нет)
+- `scripts/download_pose_model.py` — CLI-скрипт скачивания модели PoseLandmarker
+  (`pose_landmarker_lite.task`) с фиксацией и проверкой SHA-256 (pin-файл
+  `pose_landmarker_lite.task.sha256`). Запуск: `python scripts/download_pose_model.py`.
+  Выполняется на этапе CI; при старте приложения скачивание не производится —
+  только проверка целостности по pin-хешу
 
 ## 🚀 Запуск бэкенда локально
 
