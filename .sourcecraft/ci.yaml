@@ -21,4 +21,6 @@ workflows:
               - apt-get update && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 libxcb1 libx11-6 libxext6 libsm6 libxrender1
               - python -m pip install --upgrade pip
               - pip install -r requirements.txt
+              # Модель PoseLandmarker: скачивание с фиксацией и проверкой SHA-256 (supply-chain pin)
+              - python scripts/download_pose_model.py
               - python test_main.py
