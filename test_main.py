@@ -1024,7 +1024,9 @@ class TestErrorTrend(unittest.TestCase):
 
     def test_error_trend_filters_by_exercise_and_format(self):
         """Отчёты по другим упражнениям/форматам не учитываются."""
-        for _ in range(3):
+        # 6 сессий по balance — достаточно для порога 2*k при k=3;
+        # сессии по jump не должны попадать в тренд по balance.
+        for _ in range(6):
             self._save_session("balance", critical=2)
         for _ in range(3):
             self._save_session("jump", critical=5)
