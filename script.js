@@ -18,7 +18,7 @@ const resultContent = document.getElementById("result-content");
 const statusText = document.getElementById("status-text");
 const saveReportBtn = document.getElementById("save-report-btn");
 
-// ID последнего отчёта (для скачивания PDF-карточки)
+// ID последнего отчёта (для PDF-карточки и ассистента)
 let lastReportId = null;
 
 // Восстанавливаем сохранённый адрес API при загрузке страницы
@@ -35,7 +35,6 @@ function getApiBaseUrl() {
 
 /**
  * Проверяет загруженный файл: наличие, формат и размер.
- * Формат проверяется и по MIME-типу, и по расширению (для M4V MIME может быть разным).
  * Возвращает сообщение об ошибке или пустую строку при успехе.
  */
 function validateFile(file) {
@@ -64,6 +63,7 @@ function resetOutput() {
   resultContent.innerHTML = "";
   statusText.textContent = "";
   saveReportBtn.classList.add("hidden");
+  hideAgentChat();
   lastReportId = null;
 }
 
@@ -84,10 +84,7 @@ function metricCard(label, value) {
 /** Создаёт HTML-блок найденных ошибок техники. */
 function renderErrors(errors) {
   if (!errors || errors.length === 0) {
-    return `
-      <div class="feedback-success">
-        ✅ Ошибок не обнаружено. Отличная техника!
-      </div>`;
+    return `<div class="feedback-success">✅ Ошибок не обнаружено. Отличная техника!</div>`;
   }
 
   const items = errors.map((err) => {
@@ -425,10 +422,11 @@ form.addEventListener("submit", async function (event) {
     } else {
       renderAnalysis(data);
       statusText.textContent = "✅ Анализ завершён.";
-      // Отчёт сохранён на сервере — показываем кнопку скачивания PDF-карточки
+      // Отчёт сохранён на сервере — показываем PDF и ассистента
       lastReportId = data.report_id || null;
       if (lastReportId) {
         saveReportBtn.classList.remove("hidden");
+        showAgentChat();
       }
     }
   } catch (err) {
@@ -468,4 +466,116 @@ saveReportBtn.addEventListener("click", async function () {
   } finally {
     saveReportBtn.disabled = false;
   }
+});
+
+// === Ассистент тренера (LLM-агент) ===
+
+const agentChatSection = document.getElementById("agent-chat");
+const chatMessages = document.getElementById("chat-messages");
+const chatForm = document.getElementById("chat-form");
+const chatInput = document.getElementById("chat-input");
+const chatSendBtn = document.getElementById("chat-send-btn");
+
+// История диалога: [{role: "user"|"assistant", content: "..."}]
+let chatHistory = [];
+
+/** Добавляет сообщение в чат. */
+function appendChatMessage(role, text) {
+  const bubble = document.createElement("div");
+  bubble.className = `chat-message chat-${role}`;
+  bubble.textContent = text;
+  chatMessages.appendChild(bubble);
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+/** Показывает панель ассистента после успешного анализа; сбрасывает диалог. */
+function showAgentChat() {
+  chatHistory = [];
+  chatMessages.innerHTML = "";
+  if (agentChatSection) {
+    agentChatSection.classList.remove("hidden");
+  }
+}
+
+/** Скрывает панель ассистента (при сбросе результата). */
+function hideAgentChat() {
+  if (agentChatSection) {
+    agentChatSection.classList.add("hidden");
+  }
+}
+
+/** Блокирует/разблокирует отправку на время запроса. */
+function setChatBusy(busy) {
+  chatSendBtn.disabled = busy;
+  chatInput.disabled = busy;
+  chatSendBtn.textContent = busy ? "…" : "Отправить";
+}
+
+/** Отправляет сообщение агенту и показывает ответ. */
+async function sendAgentMessage(text) {
+  const message = (text || "").trim();
+  if (!message || !lastReportId) return;
+
+  appendChatMessage("user", message);
+  chatHistory.push({ role: "user", content: message });
+
+  setChatBusy(true);
+  const thinking = document.createElement("div");
+  thinking.className = "chat-message chat-assistant chat-thinking";
+  thinking.textContent = "Ассистент думает…";
+  chatMessages.appendChild(thinking);
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/agent/chat/${lastReportId}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message, history: chatHistory.slice(0, -1) }),
+      }
+    );
+    const data = await response.json();
+    thinking.remove();
+
+    if (!response.ok) {
+      const explanations = {
+        429: "Слишком много сообщений подряд — подождите минуту.",
+        503: "LLM-ассистент не настроен: задайте LLM_API_KEY на сервере.",
+        502: "Сервис LLM недоступен. Попробуйте позже.",
+      };
+      appendChatMessage(
+        "assistant",
+        explanations[response.status] || data.detail || `Ошибка сервера (${response.status})`
+      );
+      return;
+    }
+
+    const reply = data.reply || "Пустой ответ ассистента.";
+    appendChatMessage("assistant", reply);
+    chatHistory.push({ role: "assistant", content: reply });
+  } catch (err) {
+    console.error("Ошибка запроса к агенту:", err);
+    thinking.remove();
+    appendChatMessage(
+      "assistant",
+      "Не удалось связаться с ассистентом. Проверьте адрес API."
+    );
+  } finally {
+    setChatBusy(false);
+  }
+}
+
+chatForm.addEventListener("submit", function (event) {
+  event.preventDefault();
+  const text = chatInput.value;
+  chatInput.value = "";
+  sendAgentMessage(text);
+});
+
+// Кнопки-подсказки
+document.querySelectorAll(".chat-suggest").forEach((btn) => {
+  btn.addEventListener("click", function () {
+    sendAgentMessage(this.dataset.q);
+  });
 });

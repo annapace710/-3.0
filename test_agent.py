@@ -2,6 +2,7 @@
 Тесты LLM-агента (MVP: GigaChat). Внешние вызовы не выполняются: LLM мокается.
 """
 
+import json
 import os
 import sys
 import unittest
@@ -171,6 +172,117 @@ class TestContextBuilder(AgentTestCase):
         fake = storage.create_report_id()
         with self.assertRaises(ValueError):
             build_report_context(fake, reports_dir=self.reports_dir)
+
+
+class TestAgentTools(unittest.TestCase):
+    """Тесты function calling: схемы инструментов и execute_tool (без LLM)."""
+
+    def setUp(self):
+        import tempfile
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.reports_dir = self._tmp.name
+        self._orig_reports = storage.REPORTS_DIR
+        storage.REPORTS_DIR = self.reports_dir
+
+    def tearDown(self):
+        storage.REPORTS_DIR = self._orig_reports
+        self._tmp.cleanup()
+
+    def _save_report(self, exercise="balance", critical=2, format_type="individual"):
+        rid = storage.create_report_id()
+        errors = [{"severity": "critical", "message": "e"} for _ in range(critical)]
+        doc = storage.save_report(
+            rid,
+            {
+                "exercise": exercise,
+                "format": format_type,
+                "feedback": {"overall_score": 50, "errors": errors},
+                "movement": {"torso_tilt": {"avg_deg": 15.0}},
+            },
+            None,
+            self.reports_dir,
+        )
+        return doc
+
+    def test_tool_specs_valid(self):
+        from agent.tools import TOOL_SPECS
+
+        names = [spec["name"] for spec in TOOL_SPECS]
+        self.assertIn("get_error_trend", names)
+        self.assertIn("get_previous_report", names)
+        for spec in TOOL_SPECS:
+            self.assertIn("description", spec)
+            self.assertEqual(spec["parameters"]["type"], "object")
+
+    def test_execute_tool_get_error_trend(self):
+        from agent.tools import execute_tool
+
+        # 6 сессий, чтобы тренд считался (2*k при k=3)
+        for _ in range(6):
+            self._save_report(critical=2)
+        result = json.loads(
+            execute_tool(
+                "get_error_trend",
+                {"exercise": "balance", "format": "individual"},
+                reports_dir=self.reports_dir,
+            )
+        )
+        self.assertIn("trend", result)
+        self.assertEqual(result["trend"]["sessions"], 6)
+
+    def test_execute_tool_get_previous_report(self):
+        from agent.tools import execute_tool
+
+        prev = self._save_report(critical=1)
+        result = json.loads(
+            execute_tool(
+                "get_previous_report",
+                {
+                    "exercise": "balance",
+                    "format": "individual",
+                    "created_at": "2999-01-01T00:00:00+00:00",
+                },
+                reports_dir=self.reports_dir,
+            )
+        )
+        self.assertEqual(
+            result["previous_report"]["report_id"], prev["report_id"]
+        )
+
+    def test_execute_tool_previous_report_not_found(self):
+        from agent.tools import execute_tool
+
+        result = json.loads(
+            execute_tool(
+                "get_previous_report",
+                {
+                    "exercise": "rotation",
+                    "format": "group",
+                    "created_at": "2999-01-01T00:00:00+00:00",
+                },
+                reports_dir=self.reports_dir,
+            )
+        )
+        self.assertIsNone(result["previous_report"])
+
+    def test_execute_tool_unknown_and_error(self):
+        from agent.tools import execute_tool
+
+        unknown = json.loads(
+            execute_tool("no_such_tool", {}, reports_dir=self.reports_dir)
+        )
+        self.assertIn("error", unknown)
+
+        # Невалидные аргументы не должны ронять вызов — возвращается error-JSON
+        broken = json.loads(
+            execute_tool(
+                "get_error_trend",
+                {"k": "не число"},
+                reports_dir=self.reports_dir,
+            )
+        )
+        self.assertIn("error", broken)
 
 
 if __name__ == "__main__":

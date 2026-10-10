@@ -71,6 +71,29 @@
         </button>
       </section>
 
+      <section id="agent-chat" class="agent-chat hidden" aria-live="polite">
+        <h2>🤖 Ассистент тренера</h2>
+        <p class="hint">
+          LLM-агент отвечает на основе метрик этого отчёта и истории тренировок.
+          Он не выдумывает данные — ошибки уже определены детектором.
+        </p>
+        <div id="chat-messages" class="chat-messages"></div>
+        <div class="chat-suggestions">
+          <button type="button" class="chat-suggest" data-q="Почему такая оценка техники?">Почему такая оценка?</button>
+          <button type="button" class="chat-suggest" data-q="Как исправить найденные ошибки?">Как исправить ошибки?</button>
+          <button type="button" class="chat-suggest" data-q="Есть ли прогресс по этому упражнению?">Есть ли прогресс?</button>
+        </div>
+        <form id="chat-form">
+          <input
+            type="text"
+            id="chat-input"
+            placeholder="Спросите ассистента о технике…"
+            autocomplete="off"
+          />
+          <button type="submit" id="chat-send-btn">Отправить</button>
+        </form>
+      </section>
+
       <p style="margin-top:16px">
         <a href="live.html">🎥 Live-режим: анализ с веб-камеры в реальном времени (задержка &lt; 100 мс)</a>
       </p>

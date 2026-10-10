@@ -2317,7 +2317,8 @@ async def agent_chat(
         if role in ("user", "assistant") and isinstance(content, str) and content.strip():
             messages.append({"role": role, "content": content.strip()})
 
-    # 5. Запрос к LLM
+    # 5. Запрос к LLM (цикл function calling внутри ask(): модель может
+    #    запросить инструменты динамики — error_trend / previous_report)
     try:
         reply = llm.ask(messages)
     except LLMRequestError as e:

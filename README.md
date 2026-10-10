@@ -12,6 +12,15 @@
 - `report_generator.py` — генерация PDF-карточки тренировки (reportlab)
 - `train_club_detector.py` — обучение собственной модели детекции булав (YOLOv8)
 - `test_main.py` — тесты (unittest) для бэкенда
+- `test_agent.py` — тесты (unittest) для LLM-ассистента (мок-LLM, без сетевых вызовов)
+- `agent/` — модуль LLM-ассистента тренера:
+  - `agent/llm_client.py` — клиент LLM (GigaChat, бесплатный тариф) с циклом
+    function calling; абстракция `BaseLLMClient` позволяет сменить провайдера
+    через переменную окружения `LLM_PROVIDER` без переписывания
+  - `agent/prompts.py` — системный промпт методиста и сборка контекста отчёта
+    (детерминированные метрики: ошибки, оценка, тренд прогресса)
+  - `agent/tools.py` — инструменты агента (`get_error_trend`, `get_previous_report`)
+    поверх хранилища отчётов
 - `requirements.txt` — зависимости Python
 - `requirements-train.txt` — зависимости для обучения модели
 - `uploads/temp/` — временная директория для загруженных видео
