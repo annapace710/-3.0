@@ -33,7 +33,8 @@ class BaseLLMClient:
         raise NotImplementedError
 
 
-class GigaChatClient(BaseLLMClient):    """
+class GigaChatClient(BaseLLMClient):
+    """
     Клиент GigaChat. SDK `gigachat` импортируется лениво — при первом запросе.
 
     Поддерживает цикл function calling: если модель возвращает tool_calls,
