@@ -14,6 +14,12 @@ import numpy as np
 from club_tracker import ClubTracker, analyze_club_flight, assign_clubs_to_athletes
 import storage
 import report_generator
+from agent.llm_client import (
+    LLMNotConfiguredError,
+    LLMRequestError,
+    get_llm_client,
+)
+from agent.prompts import build_report_context
 
 app = FastAPI()
 
@@ -2214,4 +2220,118 @@ async def health():
     return {
         "status": "ok" if POSE_MODEL_OK else "degraded",
         "pose_model_ok": POSE_MODEL_OK,
+    }
+
+
+# --- LLM-агент-ассистент тренера (MVP: GigaChat, бесплатный тариф) ---
+
+# Rate limit на агент: сообщения в минуту на клиента (жёстче, чем /upload,
+# потому что бесплатный тариф GigaChat имеет лимиты запросов).
+AGENT_RATE_LIMIT_PER_MINUTE = int(os.environ.get("AGENT_RATE_LIMIT_PER_MINUTE", "10"))
+# Максимум сообщений истории диалога, отправляемых в LLM (ограничение стоимости)
+AGENT_MAX_HISTORY_MESSAGES = 12
+
+
+def _check_agent_rate_limit(client_id: str) -> bool:
+    """Скользящее окно 60 с для эндпоинта агента (AGENT_RATE_LIMIT_PER_MINUTE)."""
+    now = time.monotonic()
+    with _rate_limit_lock:
+        bucket = _rate_limit_buckets.setdefault(f"agent:{client_id}", [])
+        bucket[:] = [ts for ts in bucket if now - ts < 60.0]
+        if len(bucket) >= AGENT_RATE_LIMIT_PER_MINUTE:
+            return False
+        bucket.append(now)
+        return True
+
+
+@app.post("/agent/chat/{report_id}")
+async def agent_chat(
+    report_id: str,
+    request: Request,
+):
+    """
+    Чат с LLM-агентом по отчёту о тренировке.
+
+    Тело запроса (JSON):
+      {"message": "...", "history": [{"role": "user"|"assistant", "content": "..."}]}
+
+    Ответ: {"reply": "..."}.
+    Ошибки: 401/429 — auth/лимит; 404 — отчёт не найден; 400 — пустое сообщение;
+    503 — LLM не настроен; 502 — ошибка провайдера LLM.
+    """
+    # 0. Auth + отдельный rate limit для агента
+    api_key = _require_api_key(request)
+    if not _check_agent_rate_limit(_client_id(request, api_key)):
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Превышен лимит сообщений: {AGENT_RATE_LIMIT_PER_MINUTE} в минуту. "
+                "Повторите попытку позже."
+            ),
+        )
+
+    # 1. Тело запроса
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Некорректный JSON в теле запроса")
+
+    message = (body or {}).get("message") or ""
+    history = (body or {}).get("history") or []
+    if not isinstance(message, str) or not message.strip():
+        raise HTTPException(status_code=400, detail="Поле message обязательно и не может быть пустым")
+    if not isinstance(history, list):
+        raise HTTPException(status_code=400, detail="Поле history должно быть списком")
+
+    # 2. LLM должен быть настроен до обращения к хранилищу (fail fast)
+    try:
+        llm = get_llm_client()
+    except LLMNotConfiguredError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+    # 3. Контекст отчёта (детерминированные данные; отчёт не найден -> 404)
+    try:
+        context = build_report_context(report_id, reports_dir=storage.REPORTS_DIR)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    # 4. Диалог: системный промпт + контекст + ограниченная история + сообщение
+    from agent.prompts import SYSTEM_PROMPT, format_context_as_json
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                "Данные отчёта (JSON):\n"
+                + format_context_as_json(context)
+                + "\n\nВопрос тренера: "
+                + message.strip()
+            ),
+        },
+    ]
+    # История: только последние AGENT_MAX_HISTORY_MESSAGES сообщений
+    for h in history[-AGENT_MAX_HISTORY_MESSAGES:]:
+        role = h.get("role")
+        content = h.get("content")
+        if role in ("user", "assistant") and isinstance(content, str) and content.strip():
+            messages.append({"role": role, "content": content.strip()})
+
+    # 5. Запрос к LLM
+    try:
+        reply = llm.ask(messages)
+    except LLMRequestError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    return {"reply": reply, "report_id": report_id}
+
+
+@app.get("/agent/health")
+async def agent_health():
+    """Доступность LLM-агента: настроен ли провайдер и установлен ли SDK."""
+    from agent.llm_client import is_llm_configured
+
+    return {
+        "llm_configured": is_llm_configured(),
+        "provider": os.environ.get("LLM_PROVIDER", "gigachat").lower(),
     }
