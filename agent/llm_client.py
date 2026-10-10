@@ -139,3 +139,38 @@ class GigaChatClient(BaseLLMClient):
     @property
     def model(self) -> str:
         return self._model
+
+
+# --- Фабрика провайдера (по переменным окружения) ---
+
+def is_llm_configured() -> bool:
+    """True, если настроен хотя бы один провайдер (сейчас — gigachat)."""
+    provider = os.environ.get("LLM_PROVIDER", "gigachat").strip().lower()
+    if provider != "gigachat":
+        return False
+    return bool(os.environ.get("LLM_API_KEY", "").strip())
+
+
+def get_llm_client() -> BaseLLMClient:
+    """
+    Возвращает клиент LLM по переменным окружения.
+
+    LLM_PROVIDER=gigachat (по умолчанию), LLM_API_KEY обязателен,
+    LLM_MODEL — модель GigaChat (по умолчанию GigaChat).
+
+    Raises:
+        LLMNotConfiguredError: если провайдер неизвестен или нет ключа.
+    """
+    provider = os.environ.get("LLM_PROVIDER", "gigachat").strip().lower()
+    api_key = os.environ.get("LLM_API_KEY", "").strip()
+
+    if provider != "gigachat":
+        raise LLMNotConfiguredError(
+            f"Неизвестный провайдер LLM: {provider}. Поддерживается: gigachat"
+        )
+    if not api_key:
+        raise LLMNotConfiguredError(
+            "LLM_API_KEY не задан. Укажите ключ GigaChat в переменных окружения."
+        )
+    model = os.environ.get("LLM_MODEL", "GigaChat").strip() or "GigaChat"
+    return GigaChatClient(api_key=api_key, model=model)
