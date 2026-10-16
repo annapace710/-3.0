@@ -1,6 +1,19 @@
-// Параметры валидации загружаемого файла
-const VALID_FORMATS = ["video/mp4", "video/webm", "video/x-m4v", "video/hevc", "video/h265", "video/h264"];
-const VALID_EXTENSIONS = [".mp4", ".webm", ".m4v", ".hevc", ".h265", ".h264"];
+// Параметры валидации загружаемого файла.
+// Список расширений синхронизирован с ALLOWED_EXTENSIONS в main.py.
+// HEVC (H.265) и H.264 — кодеки: они живут внутри контейнеров .mp4/.mkv/.mov,
+// поэтому проверяем и расширение, и MIME-тип (включая MIME-типы кодеков).
+const VALID_FORMATS = [
+  "video/mp4",        // H.264 / HEVC (H.265) в контейнере MP4
+  "video/webm",
+  "video/x-m4v",
+  "video/quicktime",  // .mov (H.264 / HEVC)
+  "video/x-msvideo",  // .avi
+  "video/x-matroska", // .mkv (H.264 / HEVC)
+  "video/hevc",       // HEVC (H.265)
+  "video/h265",       // HEVC (H.265)
+  "video/h264",       // H.264
+];
+const VALID_EXTENSIONS = [".mp4", ".webm", ".m4v", ".avi", ".mov", ".mkv", ".hevc", ".h265", ".h264"];
 const MAX_FILE_SIZE_MB = 50;
 const MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024;
 
@@ -47,7 +60,7 @@ function validateFile(file) {
   const hasValidExtension = VALID_EXTENSIONS.some((ext) => fileName.endsWith(ext));
 
   if (!hasValidMime && !hasValidExtension) {
-    return "Недопустимый формат файла. Поддерживаются только MP4, WebM и M4V.";
+    return "Недопустимый формат файла. Поддерживаются: MP4, WebM, M4V, AVI, MOV, MKV, HEVC (H.265), H.264.";
   }
 
   if (file.size > MAX_FILE_SIZE_BYTES) {
