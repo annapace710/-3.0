@@ -52,6 +52,18 @@ class TestValidateVideoFile(unittest.TestCase):
         """Валидный M4V-файл не должен вызывать ошибку."""
         validate_video_file("video.m4v", 1024)
 
+    def test_valid_hevc(self):
+        """Валидный HEVC-файл (.hevc) не должен вызывать ошибку."""
+        validate_video_file("video.hevc", 1024)
+
+    def test_valid_h264(self):
+        """Валидный H.264-файл (.h264) не должен вызывать ошибку."""
+        validate_video_file("video.h264", 1024)
+
+    def test_valid_h265(self):
+        """Валидный H.265-файл (.h265) не должен вызывать ошибку."""
+        validate_video_file("video.h265", 1024)
+
     def test_valid_uppercase_extension(self):
         """Расширение в верхнем регистре (.MP4) должно быть принято."""
         validate_video_file("video.MP4", 1024)

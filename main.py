@@ -136,7 +136,7 @@ app.add_middleware(
 
 # Директория для временного хранения загруженных видео
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads", "temp")
-ALLOWED_EXTENSIONS = {".mp4", ".webm", ".avi", ".mov", ".mkv", ".m4v"}
+ALLOWED_EXTENSIONS = {".mp4", ".webm", ".avi", ".mov", ".mkv", ".m4v", ".hevc", ".h264", ".h265"}
 MAX_FILE_SIZE_MB = 50
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 

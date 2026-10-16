@@ -1,6 +1,6 @@
 // Параметры валидации загружаемого файла
-const VALID_FORMATS = ["video/mp4", "video/webm", "video/x-m4v"];
-const VALID_EXTENSIONS = [".mp4", ".webm", ".m4v"];
+const VALID_FORMATS = ["video/mp4", "video/webm", "video/x-m4v", "video/hevc", "video/h265", "video/h264"];
+const VALID_EXTENSIONS = [".mp4", ".webm", ".m4v", ".hevc", ".h265", ".h264"];
 const MAX_FILE_SIZE_MB = 50;
 const MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024;
 
