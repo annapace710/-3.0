@@ -1,0 +1,23 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env            # API_KEYS, LLM_API_KEY и т.д. (см. .env.example)
+    environment:
+      - UPLOAD_RATE_LIMIT_PER_MINUTE=${UPLOAD_RATE_LIMIT_PER_MINUTE:-5}
+      - AGENT_RATE_LIMIT_PER_MINUTE=${AGENT_RATE_LIMIT_PER_MINUTE:-10}
+    volumes:
+      # Видео-отчёты переживают пересоздание контейнера
+      - app-data:/app/uploads
+      # Опционально: подключить обученную модель детекции булав без пересборки
+      # - ./club_detector.onnx:/app/club_detector.onnx:ro
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4g    # защита от OOM при групповом анализе
+
+volumes:
+  app-data:

@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+.git/
+.gitignore
+uploads/reports/
+uploads/temp/
+data/
+runs/
+dataset/
+*.task
+*.onnx
+.env
+Dockerfile
+docker-compose.yml
+.dockerignore
