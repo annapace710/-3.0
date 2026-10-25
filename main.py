@@ -1779,7 +1779,9 @@ def analyze_video(video_path: str, exercise: str = "unknown", format_type: str =
                 frames_for_clubs.append(frame)
 
             pose_list = list(results.pose_landmarks) if results.pose_landmarks else []
-            world_list = list(results.world_landmarks) if results.world_landmarks else []
+            # world-ландмарки: имя атрибута менялось между версиями MediaPipe
+            # (0.10.x: pose_world_landmarks; в 1.1.x убран из результата)
+            world_list = list(getattr(results, "world_landmarks", None) or getattr(results, "pose_world_landmarks", None) or [])
             if pose_list:
                 pose_detections += 1
                 frames_with_poses.append((frame, pose_list, world_list))
